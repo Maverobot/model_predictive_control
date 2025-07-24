@@ -7,8 +7,8 @@ def main():
 
     # Time and horizon
     T = 0.1
-    N_sim = 60  # Total simulation steps
-    Np = 10  # MPC prediction horizon
+    N_sim = 120  # Total simulation steps
+    Np = 20  # MPC prediction horizon
 
     # System dynamics (double integrator)
     A = np.array([[1, T], [0, 1]])
@@ -18,15 +18,16 @@ def main():
     m = B.shape[1]  # input dim
 
     # Cost matrices
-    Q = np.diag([1.0, 0.1])  # penalize position and velocity
+    Q = np.diag([10.0, 0.1])  # penalize position and velocity
     R = np.diag([0.01])  # penalize control input
 
     # Constraints
-    u_max = 1.0
-    v_max = 2.0
+    u_max = 2.0
+    v_max = 3.0
 
-    # Reference state
-    x_ref = np.array([[10], [0]])  # target: position 10, velocity 0
+    # Moving reference: sinusoidal target
+    ref_pos = lambda t: 5 * np.sin(0.05 * t)  # reference position
+    ref_vel = lambda t: 0.5 * np.cos(0.05 * t)  # derivative of pos
 
     # Initialization
     x0 = np.array([[0], [0]])  # start at rest
@@ -36,7 +37,13 @@ def main():
     # MPC loop
     x_current = x0.copy()
     for t in range(N_sim):
-        # MPC optimization problem
+        # Predict reference trajectory for the horizon
+        x_refs = np.zeros((n, Np))
+        for k in range(Np):
+            tk = t + k
+            x_refs[:, k] = [ref_pos(tk), ref_vel(tk)]
+
+        # MPC optimization
         x = cp.Variable((n, Np + 1))
         u = cp.Variable((m, Np))
 
@@ -44,7 +51,7 @@ def main():
         constraints = [x[:, 0] == x_current.flatten()]
 
         for k in range(Np):
-            cost += cp.quad_form(x[:, k] - x_ref.flatten(), Q)
+            cost += cp.quad_form(x[:, k] - x_refs[:, k], Q)
             cost += cp.quad_form(u[:, k], R)
 
             constraints += [x[:, k + 1] == A @ x[:, k] + B @ u[:, k]]
@@ -72,22 +79,25 @@ def main():
     # Convert logs
     x_log = np.array(x_log)
     u_log = np.array(u_log)
-
-    # Plot results
     time = np.linspace(0, N_sim * T, N_sim + 1)
 
+    # Reference for plotting
+    ref_trajectory = np.array([[ref_pos(t / T), ref_vel(t / T)] for t in time])
+
+    # Plots
     plt.figure(figsize=(10, 6))
     plt.subplot(3, 1, 1)
     plt.plot(time, x_log[:, 0], label="Position")
-    plt.axhline(x_ref[0, 0], color="r", linestyle="--", label="Target Pos")
+    plt.plot(time, ref_trajectory[:, 0], "r--", label="Ref Position")
     plt.ylabel("Position")
     plt.legend()
     plt.grid()
 
     plt.subplot(3, 1, 2)
     plt.plot(time, x_log[:, 1], label="Velocity")
-    plt.axhline(v_max, color="r", linestyle="--", label="Velocity Limit")
-    plt.axhline(-v_max, color="r", linestyle="--")
+    plt.axhline(v_max, color="grey", linestyle="--", label="Velocity Limit")
+    plt.axhline(-v_max, color="grey", linestyle="--")
+    plt.plot(time, ref_trajectory[:, 1], "r--", label="Ref Velocity")
     plt.ylabel("Velocity")
     plt.legend()
     plt.grid()
