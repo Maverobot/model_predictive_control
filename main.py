@@ -1,70 +1,105 @@
+import cvxpy as cp
 import matplotlib.pyplot as plt
 import numpy as np
 
 
 def main():
 
-    # Time settings
-    T = 0.1  # Time step
-    N = 100  # Number of steps
-    time = np.linspace(0, N * T, N)
+    # Time and horizon
+    T = 0.1
+    N_sim = 60  # Total simulation steps
+    Np = 10  # MPC prediction horizon
 
     # System dynamics (double integrator)
     A = np.array([[1, T], [0, 1]])
     B = np.array([[0.5 * T**2], [T]])
 
-    # Initialize state and control
-    x = np.zeros((2, N))  # state: [position; velocity]
-    u = np.zeros(N)  # control input
+    n = A.shape[0]  # state dim
+    m = B.shape[1]  # input dim
+
+    # Cost matrices
+    Q = np.diag([1.0, 0.1])  # penalize position and velocity
+    R = np.diag([0.01])  # penalize control input
 
     # Constraints
     u_max = 1.0
     v_max = 2.0
 
-    # Define time-varying control input
-    raw_u = 2 * np.sin(0.2 * time)  # unbounded signal
+    # Reference state
+    x_ref = np.array([[10], [0]])  # target: position 10, velocity 0
 
-    # Simulate the system
-    for k in range(N - 1):
-        # Apply input constraint
-        u[k] = np.clip(raw_u[k], -u_max, u_max)
+    # Initialization
+    x0 = np.array([[0], [0]])  # start at rest
+    x_log = [x0.flatten()]
+    u_log = []
 
-        # System update
-        # @: matrix multiplication
-        # flatten(): convert B to a 1D array for multiplication
-        x[:, k + 1] = A @ x[:, k] + B.flatten() * u[k]
+    # MPC loop
+    x_current = x0.copy()
+    for t in range(N_sim):
+        # MPC optimization problem
+        x = cp.Variable((n, Np + 1))
+        u = cp.Variable((m, Np))
 
-        # Optionally apply a velocity constraint (clip after dynamics)
-        if abs(x[1, k + 1]) > v_max:
-            x[1, k + 1] = np.sign(x[1, k + 1]) * v_max
-            # Re-adjust position so it matches the constrained velocity (approx)
-            x[0, k + 1] = x[0, k] + T * x[1, k + 1]
+        cost = 0
+        constraints = [x[:, 0] == x_current.flatten()]
 
-    # Plotting
+        for k in range(Np):
+            cost += cp.quad_form(x[:, k] - x_ref.flatten(), Q)
+            cost += cp.quad_form(u[:, k], R)
+
+            constraints += [x[:, k + 1] == A @ x[:, k] + B @ u[:, k]]
+            constraints += [cp.abs(u[:, k]) <= u_max]
+            constraints += [cp.abs(x[1, k]) <= v_max]  # velocity constraint
+
+        # Solve the problem
+        prob = cp.Problem(cp.Minimize(cost), constraints)
+        prob.solve(solver=cp.OSQP)  # efficient QP solver
+
+        if prob.status != cp.OPTIMAL:
+            raise Exception(f"MPC failed at step {t} with status: {prob.status}")
+
+        # Apply first control input
+        u_applied = u[:, 0].value
+        x_next = A @ x_current + B @ u_applied.reshape(-1, 1)
+
+        # Log
+        u_log.append(u_applied.flatten())
+        x_log.append(x_next.flatten())
+
+        # Update current state
+        x_current = x_next
+
+    # Convert logs
+    x_log = np.array(x_log)
+    u_log = np.array(u_log)
+
+    # Plot results
+    time = np.linspace(0, N_sim * T, N_sim + 1)
+
     plt.figure(figsize=(10, 6))
     plt.subplot(3, 1, 1)
-    plt.plot(time, x[0], label="Position")
+    plt.plot(time, x_log[:, 0], label="Position")
+    plt.axhline(x_ref[0, 0], color="r", linestyle="--", label="Target Pos")
     plt.ylabel("Position")
-    plt.grid()
     plt.legend()
+    plt.grid()
 
     plt.subplot(3, 1, 2)
-    plt.plot(time, x[1], label="Velocity")
+    plt.plot(time, x_log[:, 1], label="Velocity")
     plt.axhline(v_max, color="r", linestyle="--", label="Velocity Limit")
     plt.axhline(-v_max, color="r", linestyle="--")
     plt.ylabel("Velocity")
-    plt.grid()
     plt.legend()
+    plt.grid()
 
     plt.subplot(3, 1, 3)
-    plt.plot(time, raw_u, "--", label="Raw Input")
-    plt.plot(time, u, label="Clipped Input")
-    plt.axhline(u_max, color="r", linestyle="--", label="Input Limit")
+    plt.plot(time[:-1], u_log[:, 0], label="Control (Accel)")
+    plt.axhline(u_max, color="r", linestyle="--", label="Accel Limit")
     plt.axhline(-u_max, color="r", linestyle="--")
     plt.xlabel("Time [s]")
-    plt.ylabel("Control Input")
-    plt.grid()
+    plt.ylabel("Acceleration")
     plt.legend()
+    plt.grid()
 
     plt.tight_layout()
     plt.show()
